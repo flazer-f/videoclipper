@@ -1,36 +1,71 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Video Clipper AI
 
-## Getting Started
+A Next.js application that automatically transforms long-form videos into short, shareable clips using AI and FFmpeg.
 
-First, run the development server:
+## Features
+- **Video Upload**: Upload MP4/files to the server.
+- **AI Processing**: 
+  - Extracts audio using FFmpeg.
+  - Generates transcript using OpenAI Whisper.
+  - Identifies viral moments using GPT-4o.
+- **Automated Clipping**: Cuts video segments using FFmpeg.
+- **Multi-Format**: Generates both 16:9 (Landscape) and 9:16 (Vertical) cropped versions.
+- **Dashboard**: View status and download generated clips.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## Architecture
+- **Frontend**: Next.js App Router, Tailwind CSS.
+- **Backend**: Next.js API Routes, Server-Side Processing.
+- **Database**: PostgreSQL (Metadata for videos and clips).
+- **Video Engine**: `fluent-ffmpeg` (Requires FFmpeg installed on system).
+- **AI**: OpenAI API.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Setup
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. **Prerequisites**:
+   - Node.js (v18+)
+   - PostgreSQL Database
+   - FFmpeg installed and in system PATH.
+   - OpenAI API Key.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+2. **Environment Variables**:
+   Create a `.env.local` file in the root:
+   ```bash
+   DATABASE_URL=postgresql://user:pass@localhost:5432/videoclipper
+   OPENAI_API_KEY=sk-...
+   ```
 
-## Learn More
+3. **Install Dependencies**:
+   ```bash
+   npm install
+   ```
 
-To learn more about Next.js, take a look at the following resources:
+4. **Initialize Database**:
+   Run the migration script to create tables:
+   ```bash
+   node scripts/migrate.js
+   ```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+5. **Run Development Server**:
+   ```bash
+   npm run dev
+   ```
+   Open [http://localhost:3000](http://localhost:3000).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## AI & System Design
+- **System Design**: The system uses a specialized pipeline:
+  1. **Ingest**: File is saved to disk and DB record created.
+  2. **Job Trigger**: Processing is triggered asynchronously (fire-and-forget for demo purposes).
+  3. **Analysis**: Whisper transcribes the audio. LLM analyzes text to find timestamped "moments".
+  4. **Processing**: FFmpeg cuts the video at timestamps. A second FFmpeg pass crops it to 9:16 for minimal latency/complexity.
+  5. **Storage**: Files stored in `public/clips`. Metadata in Postgres.
 
-## Deploy on Vercel
+- **AI Usage**:
+  - **Whisper-1**: High-accuracy transcription.
+  - **GPT-4o/4o-mini**: Context-aware content selection.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Notes
+- Large video uploads may require configuring `bodySizeLimit` in `next.config.mjs` or server configuration.
+- Video processing is CPU intensive. In production, this should be offloaded to a worker queue (e.g., BullMQ + Redis).
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## License
+MIT
