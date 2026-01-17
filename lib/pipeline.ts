@@ -4,7 +4,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import { execSync } from 'child_process';
 import { genAI } from './ai';
 import { prisma } from './db';
-
+ffmpeg.setFfmpegPath('C:\\ffmpeg-2026-01-14-git-6c878f8b82-full_build\\ffmpeg-2026-01-14-git-6c878f8b82-full_build\\bin\\ffmpeg.exe');
 // Ensure uploads and clips directories exist
 const UPLOAD_DIR = path.join(process.cwd(), 'public', 'uploads');
 const CLIPS_DIR = path.join(process.cwd(), 'public', 'clips');
@@ -64,7 +64,7 @@ export async function processVideo(videoId: number, inputPath: string) {
             );
         }
 
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
         const prompt = `
       Listen to this audio.
@@ -93,13 +93,29 @@ export async function processVideo(videoId: number, inputPath: string) {
         const response = await result.response;
         const text = response.text();
 
-        // Clean JSON markdown
-        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        // Try to extract the first valid JSON block from Gemini response
+        let jsonStr = '';
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            jsonStr = jsonMatch[0];
+        } else {
+            // Fallback: Clean markdown
+            jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        }
+
         let data;
         try {
             data = JSON.parse(jsonStr);
-        } catch {
+        } catch (err) {
             console.error("Failed to parse Gemini response", text);
+            // Store raw response for debugging
+            await prisma.video.update({
+                where: { id: videoId },
+                data: {
+                    status: 'failed',
+                    transcript: `Gemini raw response: ${text}`
+                }
+            });
             throw new Error("AI Logic failed");
         }
 
