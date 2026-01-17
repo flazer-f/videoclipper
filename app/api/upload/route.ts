@@ -1,17 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
-import { pool } from '@/lib/db';
+import { prisma } from '@/lib/db';
 import { processVideo } from '@/lib/pipeline';
-
-// This is necessary to prevent Next.js from limiting the request body size unexpectedly in some environments
-export const config = {
-    api: {
-        bodyParser: false, // We use formData which parses it, but actually App Router route handlers don't use this config export.
-    },
-};
-// In App Router, we don't use the config export for bodyParser. We just read the stream.
-// However, formData() reads the whole body.
 
 export async function POST(req: NextRequest) {
     try {
@@ -25,23 +16,30 @@ export async function POST(req: NextRequest) {
         const buffer = Buffer.from(await file.arrayBuffer());
         const filename = `${Date.now()}_${file.name.replace(/\s+/g, '_')}`;
         const uploadDir = path.join(process.cwd(), 'public', 'uploads');
+        
+        // Ensure uploads directory exists
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        
         const filePath = path.join(uploadDir, filename);
 
         // Save file
         fs.writeFileSync(filePath, buffer);
 
-        // Insert into DB
-        const result = await pool.query(
-            'INSERT INTO videos (file_path, original_name, status) VALUES ($1, $2, $3) RETURNING id',
-            [`/uploads/${filename}`, file.name, 'uploaded']
-        );
-        const videoId = result.rows[0].id;
+        // Insert into DB using Prisma
+        const video = await prisma.video.create({
+            data: {
+                filePath: `/uploads/${filename}`,
+                originalName: file.name,
+                status: 'uploaded'
+            }
+        });
 
-        // Trigger processing (async, don't await)
-        // In a real app, use a queue. Here we use setImmediate/Promise to detach.
-        processVideo(videoId, filePath).catch(err => console.error('Background processing failed', err));
+        // Trigger processing (async)
+        processVideo(video.id, filePath).catch(err => console.error('Background processing failed', err));
 
-        return NextResponse.json({ success: true, videoId });
+        return NextResponse.json({ success: true, videoId: video.id });
     } catch (error) {
         console.error('Upload error:', error);
         return NextResponse.json({ error: 'Upload failed' }, { status: 500 });

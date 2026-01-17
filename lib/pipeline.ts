@@ -1,8 +1,9 @@
 import path from 'path';
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
-import { openai } from './openai';
-import { pool } from './db';
+import { execSync } from 'child_process';
+import { genAI } from './ai';
+import { prisma } from './db';
 
 // Ensure uploads and clips directories exist
 const UPLOAD_DIR = path.join(process.cwd(), 'public', 'uploads');
@@ -10,6 +11,21 @@ const CLIPS_DIR = path.join(process.cwd(), 'public', 'clips');
 
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(CLIPS_DIR)) fs.mkdirSync(CLIPS_DIR, { recursive: true });
+
+// Check if FFmpeg is available (only called at runtime, never at build time)
+function checkFFmpeg(): void {
+    try {
+        execSync('ffmpeg -version', { stdio: 'ignore', timeout: 2000 });
+    } catch {
+        throw new Error(
+            'FFmpeg is not installed or not found in PATH. ' +
+            'Please install FFmpeg:\n' +
+            '  Windows: Download from https://ffmpeg.org/download.html or use: choco install ffmpeg\n' +
+            '  macOS: brew install ffmpeg\n' +
+            '  Linux: sudo apt-get install ffmpeg (Debian/Ubuntu) or sudo yum install ffmpeg (RHEL/CentOS)'
+        );
+    }
+}
 
 interface ClipSegment {
     start: string; // "00:01:30"
@@ -21,42 +37,109 @@ interface ClipSegment {
 export async function processVideo(videoId: number, inputPath: string) {
     try {
         console.log(`Starting processing for video ${videoId}...`);
-        await updateVideoStatus(videoId, 'processing');
+        
+        // Check FFmpeg availability before starting
+        checkFFmpeg();
+        
+        await prisma.video.update({ where: { id: videoId }, data: { status: 'processing' } });
 
         // 1. Extract Audio
         const audioPath = await extractAudio(inputPath);
         console.log('Audio extracted:', audioPath);
 
-        // 2. Transcribe
-        const transcriptText = await transcribeAudio(audioPath);
-        console.log('Transcript generated.');
+        // 2. Transcribe & Analyze with Gemini
+        // We can do both at once! Pass audio to Gemini and ask for clips.
+        // However, we want to save transcript too.
+
+        // Read audio file
+        const audioData = fs.readFileSync(audioPath);
+        const AudioBase64 = audioData.toString('base64');
+
+        // Check API key before making request
+        if (!process.env.GEMINI_API_KEY) {
+            throw new Error(
+                'GEMINI_API_KEY environment variable is not set. ' +
+                'Please set it in your .env.local file. ' +
+                'Get your API key from: https://aistudio.google.com/app/apikey'
+            );
+        }
+
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+        const prompt = `
+      Listen to this audio.
+      1. Provide a verbatim transcript.
+      2. Identify 3-5 key moments that would make good short clips (viral, interesting, or informative).
+      
+      Return JSON with this structure:
+      {
+        "transcript": "Full transcript text...",
+        "clips": [
+           { "start": "HH:MM:SS", "end": "HH:MM:SS", "title": "Catchy Title", "topic": "Topic Name" }
+        ]
+      }
+    `;
+
+        const result = await model.generateContent([
+            prompt,
+            {
+                inlineData: {
+                    mimeType: "audio/mp3",
+                    data: AudioBase64
+                }
+            }
+        ]);
+
+        const response = await result.response;
+        const text = response.text();
+
+        // Clean JSON markdown
+        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        let data;
+        try {
+            data = JSON.parse(jsonStr);
+        } catch {
+            console.error("Failed to parse Gemini response", text);
+            throw new Error("AI Logic failed");
+        }
+
+        const transcriptText = data.transcript || "No transcript generated";
+        const clips: ClipSegment[] = data.clips || [];
+
+        console.log('Gemini analysis complete.');
 
         // Save transcript to DB
-        await pool.query('UPDATE videos SET transcript = $1 WHERE id = $2', [transcriptText, videoId]);
+        await prisma.video.update({
+            where: { id: videoId },
+            data: { transcript: transcriptText }
+        });
 
-        // 3. Analyze Transcript to find clips
-        const clips = await analyzeTranscript(transcriptText);
-        console.log(`Identified ${clips.length} clips.`);
-
-        // 4. Generate Clips
+        // 3. Generate Clips with FFmpeg
         for (const clip of clips) {
             await generateClip(videoId, inputPath, clip);
         }
 
-        await updateVideoStatus(videoId, 'completed');
+        await prisma.video.update({ where: { id: videoId }, data: { status: 'completed' } });
         console.log(`Processing complete for video ${videoId}`);
 
-        // Cleanup temp audio?
-        fs.unlinkSync(audioPath);
+        // Cleanup temp audio
+        try { fs.unlinkSync(audioPath); } catch {
+            // Ignore cleanup errors
+        }
 
     } catch (error) {
-        console.error(`Error processing video ${videoId}:`, error);
-        await updateVideoStatus(videoId, 'failed');
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`Error processing video ${videoId}:`, errorMessage);
+        
+        // Store error message in transcript field for debugging
+        await prisma.video.update({ 
+            where: { id: videoId }, 
+            data: { 
+                status: 'failed',
+                transcript: `Processing failed: ${errorMessage}`
+            } 
+        });
     }
-}
-
-async function updateVideoStatus(videoId: number, status: string) {
-    await pool.query('UPDATE videos SET status = $1 WHERE id = $2', [status, videoId]);
 }
 
 async function extractAudio(videoPath: string): Promise<string> {
@@ -67,102 +150,71 @@ async function extractAudio(videoPath: string): Promise<string> {
             .audioCodec('libmp3lame')
             .save(audioPath)
             .on('end', () => resolve(audioPath))
-            .on('error', (err) => reject(err));
+            .on('error', (err) => {
+                const errorMessage = err.message || String(err);
+                if (errorMessage.includes('Cannot find ffmpeg') || errorMessage.includes('ffmpeg was not found')) {
+                    reject(new Error(
+                        'FFmpeg is not installed or not found in PATH. ' +
+                        'Please install FFmpeg and ensure it is in your system PATH.'
+                    ));
+                } else {
+                    reject(new Error(`Failed to extract audio: ${errorMessage}`));
+                }
+            });
     });
-}
-
-async function transcribeAudio(audioPath: string): Promise<string> {
-    // Use OpenAI Whisper
-    const transcription = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(audioPath),
-        model: 'whisper-1',
-    });
-    return transcription.text;
-}
-
-async function analyzeTranscript(transcript: string): Promise<ClipSegment[]> {
-    const prompt = `
-    Analyze the following transcript of a video. Identify 3-5 key moments that would make good short clips (viral, interesting, or informative).
-    Return the result as a JSON array of objects with keys: "start" (HH:MM:SS format), "end" (HH:MM:SS format), "title", "topic".
-    Ensure the segments are between 30 seconds and 90 seconds.
-    
-    Transcript:
-    ${transcript.substring(0, 50000)} ... (truncated if too long)
-  `;
-
-    const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini', // or gpt-3.5-turbo
-        messages: [
-            { role: 'system', content: 'You are a video editor assistant.' },
-            { role: 'user', content: prompt }
-        ],
-        response_format: { type: "json_object" }
-    });
-
-    const content = completion.choices[0].message.content;
-    if (!content) return [];
-
-    // Parse JSON
-    try {
-        const result = JSON.parse(content);
-        return result.clips || result; // Handle { clips: [...] } or [...]
-    } catch (e) {
-        console.error('Failed to parse AI response', e);
-        return [];
-    }
 }
 
 async function generateClip(videoId: number, videoPath: string, clip: ClipSegment) {
-    const safeTitle = clip.title.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-    const timestamp = Date.now();
+    const safeTitle = (clip.title || 'clip').replace(/[^a-z0-9]/gi, '_').toLowerCase();
     const out16_9 = path.join(CLIPS_DIR, `v${videoId}_${safeTitle}_16_9.mp4`);
     const out9_16 = path.join(CLIPS_DIR, `v${videoId}_${safeTitle}_9_16.mp4`);
 
-    // Convert "HH:MM:SS" to seconds for fluent-ffmpeg if needed, but it accepts strings too usually.
-    // Actually ffmpeg -ss accepts HH:MM:SS.
-    // But fluent-ffmpeg .setStartTime() works.
-
-    // 1. Horizontal Clip (Direct cut)
+    // 1. Horizontal Clip
     await new Promise<void>((resolve, reject) => {
         ffmpeg(videoPath)
             .setStartTime(clip.start)
-            .setDuration(calculateDuration(clip.start, clip.end)) // Duration in seconds
+            .setDuration(calculateDuration(clip.start, clip.end))
             .output(out16_9)
             .on('end', () => resolve())
-            .on('error', reject)
+            .on('error', (err) => {
+                const errorMessage = err.message || String(err);
+                if (errorMessage.includes('Cannot find ffmpeg') || errorMessage.includes('ffmpeg was not found')) {
+                    reject(new Error('FFmpeg is not installed or not found in PATH.'));
+                } else {
+                    reject(new Error(`Failed to generate 16:9 clip: ${errorMessage}`));
+                }
+            })
             .run();
     });
 
-    // 2. Vertical Clip (Crop to center 9:16)
-    // ffmpeg -i clip.mp4 -vf "crop=ih*9/16:ih" vertical.mp4
-    // We can do it from source to save generation time, or from the cut clip.
-    // From source is better quality, but slower if we do 2 passes.
-    // Let's just crop the 16:9 we just made, simpler.
+    // 2. Vertical Clip (Crop)
     await new Promise<void>((resolve, reject) => {
         ffmpeg(out16_9)
-            .videoFilters('crop=ih*(9/16):ih') // Crop the center
+            .videoFilters('crop=ih*(9/16):ih')
             .output(out9_16)
             .on('end', () => resolve())
-            .on('error', reject)
+            .on('error', (err) => {
+                const errorMessage = err.message || String(err);
+                if (errorMessage.includes('Cannot find ffmpeg') || errorMessage.includes('ffmpeg was not found')) {
+                    reject(new Error('FFmpeg is not installed or not found in PATH.'));
+                } else {
+                    reject(new Error(`Failed to generate 9:16 clip: ${errorMessage}`));
+                }
+            })
             .run();
     });
 
     // Store in DB
-    const sql = `
-    INSERT INTO clips (video_id, start_time, end_time, title, file_path_16_9, file_path_9_16)
-    VALUES ($1, $2, $3, $4, $5, $6)
-  `;
-    // We need to convert start/end string to seconds float for DB or just store string?
-    // Schema said Float. Let's parse.
-
-    await pool.query(sql, [
-        videoId,
-        parseTime(clip.start),
-        parseTime(clip.end),
-        clip.title,
-        `/clips/${path.basename(out16_9)}`,
-        `/clips/${path.basename(out9_16)}`
-    ]);
+    await prisma.clip.create({
+        data: {
+            videoId: videoId,
+            startTime: parseTime(clip.start),
+            endTime: parseTime(clip.end),
+            title: clip.title,
+            filePath169: `/clips/${path.basename(out16_9)}`,
+            filePath916: `/clips/${path.basename(out9_16)}`
+        }
+    });
 }
 
 function parseTime(timeStr: string): number {

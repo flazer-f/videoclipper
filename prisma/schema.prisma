@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Video {
+  id        Int      @id @default(autoincrement())
+  filePath  String   @map("file_path")
+  originalName String @map("original_name")
+  duration  Float?
+  transcript String?  @db.Text
+  status    String   @default("uploaded")
+  createdAt DateTime @default(now()) @map("created_at")
+  clips     Clip[]
+
+  @@map("videos")
+}
+
+model Clip {
+  id           Int      @id @default(autoincrement())
+  videoId      Int      @map("video_id")
+  video        Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  startTime    Float    @map("start_time")
+  endTime      Float    @map("end_time")
+  title        String?
+  filePath169  String?  @map("file_path_16_9")
+  filePath916  String?  @map("file_path_9_16")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("clips")
+}

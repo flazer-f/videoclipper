@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 
 interface Clip {
     id: number;
@@ -17,8 +17,9 @@ interface Video {
 
 export default function VideoList({ refreshKey }: { refreshKey: number }) {
     const [videos, setVideos] = useState<Video[]>([]);
+    const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
-    const fetchVideos = async () => {
+    const fetchVideos = useCallback(async () => {
         try {
             const res = await fetch('/api/videos');
             if (res.ok) {
@@ -28,13 +29,42 @@ export default function VideoList({ refreshKey }: { refreshKey: number }) {
         } catch (err) {
             console.error(err);
         }
-    };
+    }, []);
 
     useEffect(() => {
-        fetchVideos();
-        const interval = setInterval(fetchVideos, 3000); // Poll every 3s
-        return () => clearInterval(interval);
-    }, [refreshKey]);
+        // Fetch videos when refreshKey changes
+        const loadVideos = async () => {
+            await fetchVideos();
+        };
+        void loadVideos();
+    }, [refreshKey, fetchVideos]);
+
+    // Separate effect to manage polling based on video status
+    useEffect(() => {
+        const hasProcessingVideos = videos.some(v =>
+            v.status === 'processing' || v.status === 'uploaded'
+        );
+
+        // Clear existing interval
+        if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+        }
+
+        // Only start polling if there are videos being processed
+        if (hasProcessingVideos) {
+            intervalRef.current = setInterval(() => {
+                void fetchVideos();
+            }, 3000);
+        }
+
+        return () => {
+            if (intervalRef.current) {
+                clearInterval(intervalRef.current);
+                intervalRef.current = null;
+            }
+        };
+    }, [videos, fetchVideos]);
 
     return (
         <div className="space-y-6 mt-8">
@@ -48,8 +78,8 @@ export default function VideoList({ refreshKey }: { refreshKey: number }) {
                                 <span className="text-xs text-gray-500">ID: {video.id}</span>
                             </div>
                             <span className={`px-3 py-1 rounded-full text-xs font-medium uppercase tracking-wider ${video.status === 'completed' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300' :
-                                    video.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300' :
-                                        'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300 animate-pulse'
+                                video.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300' :
+                                    'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300 animate-pulse'
                                 }`}>
                                 {video.status}
                             </span>

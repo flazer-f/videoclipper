@@ -30,8 +30,9 @@ export default function UploadForm({ onUploadSuccess }: { onUploadSuccess: () =>
             if (input) input.value = '';
 
             onUploadSuccess();
-        } catch (err: any) {
-            setError(err.message);
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : 'Upload failed';
+            setError(errorMessage);
         } finally {
             setUploading(false);
         }
