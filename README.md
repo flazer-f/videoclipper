@@ -93,5 +93,3 @@ A Next.js application that automatically transforms long-form videos into short,
 - Large video uploads may require configuring `bodySizeLimit` in `next.config.mjs` or server configuration.
 - Video processing is CPU intensive. In production, this should be offloaded to a worker queue (e.g., BullMQ + Redis).
 
-## License
-MIT
