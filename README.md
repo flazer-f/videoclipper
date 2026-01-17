@@ -1,3 +1,4 @@
+
 # Video Clipper AI
 
 A Next.js application that automatically transforms long-form videos into short, shareable clips using AI and FFmpeg.
@@ -54,6 +55,28 @@ A Next.js application that automatically transforms long-form videos into short,
    npm run dev
    ```
    Open [http://localhost:3000](http://localhost:3000).
+
+## Database Schema
+
+- **Video**
+  - `id` (Int, PK)
+  - `filePath` (String)
+  - `originalName` (String)
+  - `duration` (Float, optional)
+  - `transcript` (Text, optional)
+  - `status` (String, default: 'uploaded')
+  - `createdAt` (DateTime)
+  - `clips` (Relation to Clip[])
+
+- **Clip**
+  - `id` (Int, PK)
+  - `videoId` (Int, FK)
+  - `startTime` (Float)
+  - `endTime` (Float)
+  - `title` (String, optional)
+  - `filePath169` (String, optional)
+  - `filePath916` (String, optional)
+  - `createdAt` (DateTime)
 
 ## AI & System Design
 - **System Design**: The system uses a specialized pipeline:
